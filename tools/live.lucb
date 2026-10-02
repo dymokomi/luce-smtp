@@ -1,0 +1,26 @@
+## A live check against a real server, not part of CI:
+##     luce-base build tools/live.lucb --native -o build/live
+##     build/live HOST PORT plain|starttls|tls FROM TO [USER PASSWORD]
+## Sends one short test message from FROM to TO.
+import smtp
+import strings
+
+pub func main(arguments: str[]) -> i32!:
+    if arguments.length < 6:
+        print("usage: live HOST PORT plain|starttls|tls FROM TO [USER PASSWORD]")
+        return 2
+    let port = strings.parse_u64(arguments[2]) else trap("bad port")
+    let security = smtp.Security.tls if arguments[3] == "tls" else (smtp.Security.starttls if arguments[3] == "starttls" else smtp.Security.plain)
+    var client = try smtp.Client.open(arguments[1], u16(port), security)
+    defer client.close()
+    let secure = client.is_secure()
+    print(f"connected, secure: {secure}")
+    if arguments.length >= 8:
+        try client.login(arguments[6], arguments[7])
+    let recipients: str[1] = [arguments[5]]
+    var message: u8[512]
+    let text = try format(message, f"From: {arguments[4]}\r\nTo: {arguments[5]}\r\nSubject: luce-smtp live check\r\n\r\nSent by luce-smtp.\r\n.dot line\r\n")
+    let accepted = try client.send(arguments[4], recipients, text.bytes)
+    print(f"accepted by {accepted}: {client.text()}")
+    client.quit()
+    return 0

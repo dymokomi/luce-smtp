@@ -1,0 +1,122 @@
+#==============================================================================================
+#
+#   smtp/sending - MAIL, RCPT and DATA
+#
+#   DESCRIPTION:
+#       `send` hands one message to the server for its recipients. MAIL FROM gives the
+#       envelope sender, with SIZE when the server limits size, BODY=8BITMIME when the
+#       message has 8-bit bytes, and SMTPUTF8 when an address does. Each recipient gets its
+#       own RCPT TO; refused ones are kept (`refused`) and the rest still get the
+#       message. With none accepted the transaction is reset and the send fails. DATA
+#       sends the message with CRLF line ends, a dot doubled where a line starts with
+#       one, and ends with a lone dot.
+#
+#==============================================================================================
+
+## Whether `data` has a byte outside 7-bit ASCII.
+func has_high(data: const u8[]) -> bool:
+    for byte in data:
+        if byte >= 0x80:
+            return true
+    return false
+
+extend Client:
+    ## Send message `data` from envelope sender `sender` to `recipients`; how many
+    ## recipients accepted it. Refused recipients are listed by `refused`.
+    pub mutating func send(sender: str, recipients: const str[], data: const u8[]) -> usize!:
+        self.refused_text.clear()
+        self.refused_total = 0
+        if recipients.length == 0:
+            error(no_recipients, "the message has no recipients")
+        if let limit = self.extension("SIZE"):
+            var maximum: u64 = 0
+            for digit in limit:
+                if digit >= '0' and digit <= '9':
+                    maximum = maximum * 10 + (u64)(digit - '0')
+            if maximum > 0 and (u64)data.length > maximum:
+                error(limit_exceeded, "the message is larger than the server accepts")
+        var international = has_high(sender.bytes)
+        for recipient in recipients:
+            if has_high(recipient.bytes):
+                international = true
+        if international and not self.has("SMTPUTF8"):
+            error(unsupported, "an address needs SMTPUTF8, which the server does not offer")
+        var line: Bytes
+        defer line.close()
+        try line.put(b"MAIL FROM:<")
+        try line.text(sender)
+        try line.byte('>')
+        if self.has("SIZE"):
+            try line.put(b" SIZE=")
+            try line.number((u64)data.length)
+        if has_high(data) and self.has("8BITMIME"):
+            try line.put(b" BODY=8BITMIME")
+        if international:
+            try line.put(b" SMTPUTF8")
+        try self.expect(line.view(), 2)
+        var accepted: usize = 0
+        for recipient in recipients:
+            line.clear()
+            try line.put(b"RCPT TO:<")
+            try line.text(recipient)
+            try line.byte('>')
+            let code = try self.command(line.view())
+            if code // 100 == 2:
+                accepted += 1
+            else:
+                try self.refused_text.text(recipient)
+                try self.refused_text.byte('\n')
+                self.refused_total += 1
+        if accepted == 0:
+            discard(try self.command(b"RSET"))
+            error(no_recipients, "the server refused every recipient")
+        if try self.command(b"DATA") != 354:
+            try self.fail("DATA")
+        try self.write_data(data)
+        try self.read_reply()
+        if self.reply_code // 100 != 2:
+            try self.fail("the message")
+        return accepted
+
+    ## Write `data` dot-stuffed with CRLF line ends, then the closing dot.
+    mutating func write_data(data: const u8[]) -> !:
+        var out: Bytes
+        defer out.close()
+        var line_start = true
+        var index: usize = 0
+        while index < data.length:
+            let byte = data[index]
+            if line_start and byte == '.':
+                try out.byte('.')
+            line_start = false
+            if byte == '\r' or byte == '\n':
+                try out.put(b"\r\n")
+                line_start = true
+                index += 2 if byte == '\r' and index + 1 < data.length and data[index + 1] == '\n' else 1
+            else:
+                try out.byte(byte)
+                index += 1
+            if out.used >= 65536:
+                try self.write(out.view())
+                out.clear()
+        if not line_start:
+            try out.put(b"\r\n")
+        try out.put(b".\r\n")
+        try self.write(out.view())
+
+    ## How many recipients the last `send` refused.
+    pub func refused_count() -> usize:
+        return self.refused_total
+
+    ## Refused recipient `index` of the last `send`.
+    pub func refused(index: usize) -> str!:
+        let data = self.refused_text.view()
+        var start: usize = 0
+        var seen: usize = 0
+        for at in 0..<data.length:
+            if data[at] == '\n':
+                if seen == index:
+                    return (str)data[start..<at]
+                seen += 1
+                start = at + 1
+        error(limit_exceeded, "no refused recipient at that index")

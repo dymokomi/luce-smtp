@@ -1,0 +1,46 @@
+#==============================================================================================
+#
+#   smtp - Sending mail
+#
+#   DESCRIPTION:
+#       A Client submits messages to a mail server (RFC 6409 submission, RFC 5321 SMTP):
+#       it reads the greeting, says EHLO and learns the extensions, upgrades with STARTTLS
+#       or starts in TLS, authenticates, and sends each message as MAIL FROM, one RCPT TO
+#       a recipient and DATA with the message dot-stuffed. Every reply is kept: a refused
+#       recipient does not stop the others, and a failure carries the server's code and
+#       text. The connection is a luce-tls Stream with deadlines and cancellation.
+#
+#       Fragments, in ORDER:
+#
+#       module.lucb      imports, error codes
+#       buffer.lucb      Bytes and SASL base64
+#       client.lucb      Client: connect, EHLO, STARTTLS, AUTH, replies
+#       sending.lucb     MAIL, RCPT, DATA
+#       tests.lucb       sessions against a scripted loopback server
+#
+#==============================================================================================
+
+import io
+import memory
+import net
+import strings
+import sync
+import thread
+import tls_stream
+
+## The server refused permanently (a 5xx reply): the same request will fail again.
+pub let rejected: ErrorCode = ErrorCode.package(1)
+## The server refused for now (a 4xx reply): trying later may work.
+pub let deferred: ErrorCode = ErrorCode.package(2)
+## The server closed the connection.
+pub let disconnected: ErrorCode = ErrorCode.package(3)
+## The server sent something that is not SMTP.
+pub let protocol: ErrorCode = ErrorCode.package(4)
+## The server does not offer what was asked: STARTTLS, an authentication method.
+pub let unsupported: ErrorCode = ErrorCode.package(5)
+## The server refused the credentials.
+pub let authentication: ErrorCode = ErrorCode.package(6)
+## A reply or a message past what this client accepts or the server allows.
+pub let limit_exceeded: ErrorCode = ErrorCode.package(7)
+## Every recipient was refused, so nothing was sent.
+pub let no_recipients: ErrorCode = ErrorCode.package(8)

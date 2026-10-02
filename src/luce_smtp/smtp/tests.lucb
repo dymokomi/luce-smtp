@@ -1,0 +1,147 @@
+#==============================================================================================
+#
+#   smtp/tests - Sessions against a scripted server on the loopback interface
+#
+#   DESCRIPTION:
+#       The server runs on a thread: it sends a greeting, then for each step reads one
+#       line, checks it starts with the step's expected text and sends the reply.
+#
+#==============================================================================================
+
+## One exchange: a line the client sends and the server's answer (may be empty).
+struct Step:
+    var expect: str
+    var reply: str
+
+## A scripted server and how it went.
+struct Script:
+    var listener: net.Listener
+    var greeting: str
+    var steps: const Step[]
+    var completed: usize
+    var failure: str
+
+## Whether `a` and `b` hold the same bytes.
+func equal(a: const u8[], b: const u8[]) -> bool:
+    if a.length != b.length:
+        return false
+    for index in 0..<a.length:
+        if a[index] != b[index]:
+            return false
+    return true
+
+## The scripted server's thread.
+func serve(context: void*?):
+    let script = (Script*)(context else return)
+    var connection = script.listener.accept() catch failure:
+        script.failure = "the server could not accept"
+        return
+    defer connection.destroy()
+    io.write_all(&connection, script.greeting.bytes) catch failure:
+        script.failure = "the server could not greet"
+        return
+    var buffer: u8[65536]
+    var used: usize = 0
+    for step in script.steps:
+        var end: usize? = none
+        while end == none:
+            for index in 0..<used:
+                if buffer[index] == '\n':
+                    end = index
+                    break
+            if end != none:
+                break
+            let count = connection.read(buffer[used..]) catch failure:
+                script.failure = "the server could not read"
+                return
+            if count == 0:
+                script.failure = "the client closed early"
+                return
+            used += count
+        let stop = end else return
+        var line = buffer[0..<stop]
+        if line.length > 0 and line[line.length - 1] == '\r':
+            line = line[0..<line.length - 1]
+        if line.length < step.expect.length or not equal(line[0..<step.expect.length], step.expect.bytes):
+            script.failure = step.expect
+            return
+        let consumed = stop + 1
+        memory.move(buffer[0..], buffer[consumed..], used - consumed)
+        used -= consumed
+        io.write_all(&connection, step.reply.bytes) catch failure:
+            script.failure = "the server could not reply"
+            return
+        script.completed += 1
+
+## Start `script` on a thread and connect a client to it.
+func start_script(script: Script*) -> (Client, thread.Handle)!:
+    script.listener = try net.Listener.bind(net.SocketAddress.loopback(0))
+    let port = (try script.listener.address()).port
+    let handle = try thread.spawn(serve, script)
+    let connection = try net.Connection.connect(net.SocketAddress.loopback(port), nonblocking = true)
+    let client = try Client.over(connection, name = "client.test", timeout = 5000000000)
+    return (client, handle)
+
+## Wait for the server and check it ran every step.
+func finish_script(script: Script*, handle: thread.Handle) -> !:
+    try handle.join()
+    script.listener.destroy()
+    if script.completed != script.steps.length:
+        print(f"script stopped at step {script.completed}: {script.failure}")
+    assert(script.completed == script.steps.length)
+
+let sending_steps: Step[13] = [
+    Step(expect = "EHLO client.test", reply = "250-mail.test greets client.test\r\n250-SIZE 1000\r\n250-8BITMIME\r\n250-AUTH LOGIN PLAIN\r\n250 HELP\r\n"),
+    Step(expect = "AUTH PLAIN AGFsaWNlAHNlY3JldA==", reply = "235 2.7.0 Authentication successful\r\n"),
+    Step(expect = "MAIL FROM:<alice@example.test> SIZE=31 BODY=8BITMIME", reply = "250 OK\r\n"),
+    Step(expect = "RCPT TO:<bob@example.test>", reply = "250 OK\r\n"),
+    Step(expect = "RCPT TO:<nobody@example.test>", reply = "550 5.1.1 No such user\r\n"),
+    Step(expect = "DATA", reply = "354 Go ahead\r\n"),
+    Step(expect = "Subject: Hi", reply = ""),
+    Step(expect = "", reply = ""),
+    Step(expect = "..leading dot", reply = ""),
+    Step(expect = "café", reply = ""),
+    Step(expect = ".", reply = "250 2.0.0 Queued as 12345\r\n"),
+    Step(expect = "MAIL FROM:<alice@example.test> SIZE=3", reply = "451 4.3.0 Try again later\r\n"),
+    Step(expect = "QUIT", reply = "221 Bye\r\n"),
+]
+
+test "a client authenticates, sends to the recipients it can and reports the rest":
+    var script = Script(greeting = "220 mail.test ESMTP ready\r\n", steps = sending_steps)
+    var (client, handle) = try start_script(&script)
+    defer client.close()
+    assert(client.has("size") and client.has("8BITMIME") and not client.has("STARTTLS"))
+    assert(client.offers("plain") and client.offers("LOGIN") and not client.offers("XOAUTH2"))
+    try client.login("alice", "secret")
+    let recipients: str[2] = ["bob@example.test", "nobody@example.test"]
+    let accepted = try client.send("alice@example.test", recipients, "Subject: Hi\n\n.leading dot\ncafé".bytes)
+    assert(accepted == 1 and client.code() == 250)
+    assert(client.refused_count() == 1 and try client.refused(0) == "nobody@example.test")
+    let one: str[1] = ["bob@example.test"]
+    var deferred_send = false
+    discard(client.send("alice@example.test", one, b"x\r\n") catch failure:
+        assert(failure.code == deferred and client.text() == "4.3.0 Try again later")
+        deferred_send = true
+        recover 0)
+    assert(deferred_send)
+    client.quit()
+    try finish_script(&script, handle)
+
+let refusing_steps: Step[3] = [
+    Step(expect = "EHLO client.test", reply = "250-mail.test\r\n250 AUTH LOGIN\r\n"),
+    Step(expect = "AUTH LOGIN", reply = "334 VXNlcm5hbWU6\r\n"),
+    Step(expect = "YWxpY2U=", reply = "535 5.7.8 Authentication credentials invalid\r\n"),
+]
+
+test "a refused login fails with authentication":
+    var script = Script(greeting = "220 mail.test\r\n", steps = refusing_steps)
+    var (client, handle) = try start_script(&script)
+    defer client.close()
+    var refused = false
+    client.login("alice", "wrong") catch failure:
+        assert(failure.code == authentication)
+        refused = true
+        recover ()
+    assert(refused)
+    client.close()
+    try finish_script(&script, handle)

@@ -1,0 +1,330 @@
+#==============================================================================================
+#
+#   smtp/client - Connecting, EHLO, STARTTLS, AUTH and replies
+#
+#   DESCRIPTION:
+#       A reply is one or more lines with the same three-digit code, all but the last
+#       written `250-…`, the last `250 …`. The client keeps the last reply's code and its
+#       text (the lines joined by newlines) for the caller. EHLO's reply lists the
+#       extensions, one keyword a line with its parameters (`SIZE 35882577`,
+#       `AUTH PLAIN LOGIN XOAUTH2`); they are kept upper-cased for `has` and
+#       `parameters`. A 4xx reply fails with `deferred`, a 5xx with `rejected`.
+#
+#==============================================================================================
+
+## The default time any one read or write may take.
+pub let default_timeout: u64 = 60 * 1000000000
+
+## The longest reply accepted, all its lines together.
+let maximum_reply: usize = 65536
+
+## How the connection is protected.
+pub enum Security as u8:
+    ## No TLS: only for a local test server.
+    plain = 0
+    ## Plain at first, upgraded by STARTTLS before AUTH (port 587).
+    starttls = 1
+    ## TLS from the first byte (port 465).
+    tls = 2
+
+## The ASCII upper case of `byte`.
+func upper(byte: u8) -> u8:
+    return byte - 32 if byte >= 'a' and byte <= 'z' else byte
+
+## Whether `a` and `b` are equal ignoring ASCII case.
+func same(a: const u8[], b: const u8[]) -> bool:
+    if a.length != b.length:
+        return false
+    for index in 0..<a.length:
+        if upper(a[index]) != upper(b[index]):
+            return false
+    return true
+
+## A connection to one submission server.
+pub struct Client:
+    var stream: tls_stream.Stream
+    ## Nanoseconds any one read or write may take.
+    pub var timeout: u64
+    var cancellation: sync.Cancellation*?
+    var connected: bool
+    var input: Bytes
+    var input_start: usize
+    ## The EHLO extension lines after the first, upper-cased, each ending in a newline.
+    var extensions: Bytes
+    var reply_code: u16
+    var reply_text: Bytes
+    ## Recipients the last `send` refused, each ending in a newline.
+    var refused_text: Bytes
+    var refused_total: usize
+
+    ## Connect to `host` on `port`, read the greeting, say EHLO as `name` and upgrade
+    ## with STARTTLS when `security` asks for it.
+    pub static func open(host: str, port: u16, security: Security, name: str = "localhost", timeout: u64 = default_timeout, cancellation: sync.Cancellation*? = none, trust: tls_stream.Trust = tls_stream.Trust()) -> Client!:
+        let stream = try tls_stream.Stream.connect(host, port, security == Security.tls, try net.Deadline.after(timeout), cancellation, policy = trust)
+        var client = Client(stream = stream, timeout = timeout, cancellation = cancellation, connected = true)
+        errdefer client.close()
+        try client.greet(name)
+        if security == Security.starttls:
+            if not client.has("STARTTLS"):
+                error(unsupported, "the server does not offer STARTTLS")
+            try client.expect(b"STARTTLS", 2)
+            if client.input_start < client.input.used:
+                error(protocol, "the server sent data after its STARTTLS answer")
+            client.stream.set_deadline(try net.Deadline.after(timeout), cancellation)
+            try client.stream.start_tls(host, trust)
+            try client.hello(name)
+        return client
+
+    ## A client over an already connected, plain `connection` (tests).
+    pub static func over(connection: net.Connection, name: str = "localhost", timeout: u64 = default_timeout) -> Client!:
+        var client = Client(stream = tls_stream.Stream.plain(connection), timeout = timeout, connected = true)
+        errdefer client.close()
+        try client.greet(name)
+        return client
+
+    ## Read the greeting and say EHLO.
+    mutating func greet(name: str) -> !:
+        try self.read_reply()
+        if self.reply_code != 220:
+            try self.fail("the server's greeting")
+        try self.hello(name)
+
+    ## Say EHLO as `name` and learn the extensions; fall back to HELO.
+    mutating func hello(name: str) -> !:
+        var line: Bytes
+        defer line.close()
+        try line.put(b"EHLO ")
+        try line.text(name)
+        let code = try self.command(line.view())
+        if code // 100 != 2:
+            line.clear()
+            try line.put(b"HELO ")
+            try line.text(name)
+            try self.expect(line.view(), 2)
+            self.extensions.clear()
+            return
+        self.extensions.clear()
+        let text = self.reply_text.view()
+        # The first line names the server; each later one is an extension.
+        var index: usize = 0
+        while index < text.length and text[index] != '\n':
+            index += 1
+        index += 1
+        while index < text.length:
+            try self.extensions.byte(upper(text[index]))
+            index += 1
+        if self.extensions.used > 0:
+            try self.extensions.byte('\n')
+
+    ## Whether the server offers extension `keyword` (`STARTTLS`, `SIZE`), ignoring case.
+    pub func has(keyword: str) -> bool:
+        return self.extension(keyword) != none
+
+    ## The parameters of extension `keyword`, upper-cased (`PLAIN LOGIN` for AUTH), or
+    ## none when it is not offered.
+    pub func extension(keyword: str) -> const u8[]?:
+        let data = self.extensions.view()
+        var start: usize = 0
+        while start < data.length:
+            var end = start
+            while end < data.length and data[end] != '\n':
+                end += 1
+            var word_end = start
+            while word_end < end and data[word_end] != ' ' and data[word_end] != '=':
+                word_end += 1
+            if same(data[start..<word_end], keyword.bytes):
+                return data[(word_end + 1 if word_end < end else end)..<end]
+            start = end + 1
+        return none
+
+    ## Whether authentication method `mechanism` is offered.
+    pub func offers(mechanism: str) -> bool:
+        let methods = self.extension("AUTH") else return false
+        var start: usize = 0
+        while start < methods.length:
+            var end = start
+            while end < methods.length and methods[end] != ' ':
+                end += 1
+            if same(methods[start..<end], mechanism.bytes):
+                return true
+            start = end + 1
+        return false
+
+    ## Whether the connection is protected by TLS.
+    pub func is_secure() -> bool:
+        return self.stream.is_secure()
+
+    ## The code of the last reply.
+    pub func code() -> u16:
+        return self.reply_code
+
+    ## The text of the last reply, its lines joined by newlines.
+    pub func text() -> str:
+        return (str)self.reply_text.view()
+
+    # mark: replies ==============================================================================
+
+    ## Read one reply into `reply_code` and `reply_text`.
+    mutating func read_reply() -> !:
+        self.reply_text.clear()
+        while true:
+            let line = try self.read_line()
+            if line.length < 3:
+                error(protocol, "a reply line too short to hold a code")
+            var code: u16 = 0
+            for digit in line[0..<3]:
+                if digit < '0' or digit > '9':
+                    error(protocol, "a reply without a numeric code")
+                code = code * 10 + (u16)(digit - '0')
+            self.reply_code = code
+            if self.reply_text.used > 0:
+                try self.reply_text.byte('\n')
+            for byte in line[(4 if line.length > 4 else line.length)..]:
+                try self.reply_text.byte(byte if byte >= 0x20 and byte < 0x7F else '?')
+            if self.reply_text.used > maximum_reply:
+                error(limit_exceeded, "the reply is too long")
+            if line.length == 3 or line[3] != '-':
+                return
+
+    ## The next line without its line end, valid until the next read.
+    mutating func read_line() -> const u8[]!:
+        var searched: usize = 0
+        while true:
+            let data = self.input.view()
+            var index = self.input_start + searched
+            while index < data.length and data[index] != '\n':
+                index += 1
+            if index < data.length:
+                var end = index
+                if end > self.input_start and data[end - 1] == '\r':
+                    end -= 1
+                let line = data[self.input_start..<end]
+                self.input_start = index + 1
+                return line
+            searched = data.length - self.input_start
+            if searched > maximum_reply:
+                error(limit_exceeded, "a reply line is too long")
+            try self.fill()
+
+    ## Read more from the server, first moving unread bytes to the front.
+    mutating func fill() -> !:
+        if not self.connected:
+            error(disconnected, "the connection is closed")
+        if self.input_start > 0:
+            let unread = self.input.used - self.input_start
+            memory.move(self.input.data, self.input.data[self.input_start..], unread)
+            self.input.used = unread
+            self.input_start = 0
+        try self.input.reserve(4096)
+        let count = try self.stream.read_within(self.input.data[self.input.used..], try net.Deadline.after(self.timeout), self.cancellation)
+        if count == 0:
+            error(disconnected, "the server closed the connection")
+        self.input.used += count
+
+    ## Write `data` as it is.
+    mutating func write(data: const u8[]) -> !:
+        if not self.connected:
+            error(disconnected, "the connection is closed")
+        try self.stream.write_within(data, try net.Deadline.after(self.timeout), self.cancellation)
+
+    ## Send `line` with CRLF and read the reply; its code.
+    mutating func command(line: const u8[]) -> u16!:
+        var out: Bytes
+        defer out.close()
+        try out.put(line)
+        try out.put(b"\r\n")
+        try self.write(out.view())
+        try self.read_reply()
+        return self.reply_code
+
+    ## Send `line` and fail unless the reply's code is in class `expected` (2 or 3).
+    mutating func expect(line: const u8[], expected: u16) -> !:
+        if try self.command(line) // 100 != expected:
+            try self.fail("the server refused")
+
+    ## Fail with the last reply: deferred for 4xx, rejected for 5xx.
+    mutating func fail(context: str) -> !:
+        if self.reply_text.used == 0:
+            try self.reply_text.text(context)
+        if self.reply_code // 100 == 4:
+            error(deferred, self.text())
+        error(rejected, self.text())
+
+    # mark: authentication =======================================================================
+
+    ## Authenticate with a user name and password: AUTH PLAIN, else AUTH LOGIN.
+    pub mutating func login(user: str, password: str) -> !:
+        var answer: Bytes
+        defer answer.close()
+        var line: Bytes
+        defer line.close()
+        if self.offers("PLAIN"):
+            try answer.byte(0)
+            try answer.text(user)
+            try answer.byte(0)
+            try answer.text(password)
+            try line.put(b"AUTH PLAIN ")
+            try put_base64(answer.view(), &line)
+            try self.finish_auth(try self.command(line.view()))
+            return
+        if self.offers("LOGIN"):
+            if try self.command(b"AUTH LOGIN") != 334:
+                try self.fail("AUTH LOGIN")
+            try put_base64(user.bytes, &line)
+            if try self.command(line.view()) != 334:
+                try self.finish_auth(self.reply_code)
+                return
+            line.clear()
+            try put_base64(password.bytes, &line)
+            try self.finish_auth(try self.command(line.view()))
+            return
+        error(unsupported, "the server offers no password authentication")
+
+    ## Authenticate with an OAuth 2 access token (AUTH XOAUTH2).
+    pub mutating func login_oauth(user: str, token: str) -> !:
+        if not self.offers("XOAUTH2"):
+            error(unsupported, "the server does not offer XOAUTH2")
+        var answer: Bytes
+        defer answer.close()
+        try answer.put(b"user=")
+        try answer.text(user)
+        try answer.put(b"\x01auth=Bearer ")
+        try answer.text(token)
+        try answer.put(b"\x01\x01")
+        var line: Bytes
+        defer line.close()
+        try line.put(b"AUTH XOAUTH2 ")
+        try put_base64(answer.view(), &line)
+        var code = try self.command(line.view())
+        if code == 334:
+            # The server explains the failure in a challenge; an empty answer ends it.
+            code = try self.command(b"")
+        try self.finish_auth(code)
+
+    ## Check the completion of AUTH: 235 is success, anything else a failure.
+    mutating func finish_auth(code: u16) -> !:
+        if code == 235:
+            return
+        if code // 100 == 5:
+            error(authentication, self.text())
+        try self.fail("authentication")
+
+    # mark: closing ==============================================================================
+
+    ## Say goodbye and close; failures are ignored, the connection goes either way.
+    pub mutating func quit():
+        if self.connected:
+            discard(self.command(b"QUIT") catch failure:
+                recover 0)
+        self.close()
+
+    ## Close the connection and give everything back.
+    pub mutating func close():
+        if self.connected:
+            self.stream.close() catch failure:
+                self.stream.destroy()
+            self.connected = false
+        self.input.close()
+        self.extensions.close()
+        self.reply_text.close()
+        self.refused_text.close()

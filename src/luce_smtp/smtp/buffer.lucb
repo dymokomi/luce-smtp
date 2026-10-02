@@ -1,0 +1,88 @@
+#==============================================================================================
+#
+#   smtp/buffer - A growable byte buffer, and base64 for SASL
+#
+#==============================================================================================
+
+## A growable run of bytes.
+pub struct Bytes:
+    var data: u8[]
+    var used: usize
+
+    mutating func reserve(extra: usize) -> !:
+        let needed = self.used +? extra else error(limit_exceeded, "the buffer is too large")
+        if needed <= self.data.length:
+            return
+        var capacity: usize = 256 if self.data.length == 0 else self.data.length * 2
+        while capacity < needed:
+            capacity *= 2
+        let grown = try new u8[capacity] in memory.heap
+        memory.copy(grown, self.data, self.used)
+        if self.data.length > 0:
+            free(self.data) in memory.heap
+        self.data = grown
+
+    ## Append `data`.
+    pub mutating func put(data: const u8[]) -> !:
+        try self.reserve(data.length)
+        memory.copy(self.data[self.used..], data, data.length)
+        self.used += data.length
+
+    ## Append `text`.
+    pub mutating func text(text: str) -> !:
+        try self.put(text.bytes)
+
+    ## Append one byte.
+    pub mutating func byte(value: u8) -> !:
+        if self.used == self.data.length:
+            try self.reserve(1)
+        self.data[self.used] = value
+        self.used += 1
+
+    ## Append `value` in decimal.
+    pub mutating func number(value: u64) -> !:
+        var digits: u8[20]
+        var count: usize = 0
+        var rest = value
+        while rest > 0 or count == 0:
+            digits[count] = (u8)(rest % 10) + '0'
+            rest = rest // 10
+            count += 1
+        while count > 0:
+            count -= 1
+            try self.byte(digits[count])
+
+    ## The bytes so far, valid until the next append.
+    pub func view() -> const u8[]:
+        return self.data[0..<self.used]
+
+    ## Forget the contents, keeping the storage.
+    pub mutating func clear():
+        self.used = 0
+
+    ## Give the storage back.
+    pub mutating func close():
+        if self.data.length > 0:
+            free(self.data) in memory.heap
+        var empty: u8[]
+        self.data = empty
+        self.used = 0
+
+let base64_letters: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+## Append `data` in base64 on one line, as SASL wants it.
+func put_base64(data: const u8[], out: Bytes*) -> !:
+    let letters = base64_letters.bytes
+    var index: usize = 0
+    while index < data.length:
+        let remaining = data.length - index
+        var group: u32 = (u32)data[index] << 16
+        if remaining > 1:
+            group |= (u32)data[index + 1] << 8
+        if remaining > 2:
+            group |= data[index + 2]
+        try out.byte(letters[(group >> 18) & 63])
+        try out.byte(letters[(group >> 12) & 63])
+        try out.byte(letters[(group >> 6) & 63] if remaining > 1 else '=')
+        try out.byte(letters[group & 63] if remaining > 2 else '=')
+        index += 3 if remaining >= 3 else remaining
