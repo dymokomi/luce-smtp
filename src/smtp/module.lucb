@@ -22,11 +22,11 @@
 
 import io
 import memory
-import net
+import luce_std.net
 import strings
 import sync
 import thread
-import tls_stream
+import luce_tls.stream as tls_stream
 
 ## The server refused permanently (a 5xx reply): the same request will fail again.
 pub let rejected: ErrorCode = ErrorCode.package(1)
