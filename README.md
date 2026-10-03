@@ -8,7 +8,7 @@ with dot-stuffing, and SIZE, 8BITMIME and SMTPUTF8 are used when the server
 offers them. Every reply's code and text are kept for the caller.
 
 ```luce-base
-import luce_smtp.smtp
+from luce_smtp import smtp
 
 var client = try smtp.Client.open("smtp.example.com", 587, smtp.Security.starttls)
 defer client.close()
