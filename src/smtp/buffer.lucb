@@ -9,7 +9,7 @@ pub struct Bytes:
     var data: u8[]
     var used: usize
 
-    mutating func reserve(extra: usize) -> !:
+    func reserve(extra: usize) -> !:
         let needed = self.used +? extra else error(limit_exceeded, "the buffer is too large")
         if needed <= self.data.length:
             return
@@ -23,24 +23,24 @@ pub struct Bytes:
         self.data = grown
 
     ## Append `data`.
-    pub mutating func put(data: const u8[]) -> !:
+    pub func put(data: const u8[]) -> !:
         try self.reserve(data.length)
         memory.copy(self.data[self.used..], data, data.length)
         self.used += data.length
 
     ## Append `text`.
-    pub mutating func text(text: str) -> !:
+    pub func text(text: str) -> !:
         try self.put(text.bytes)
 
     ## Append one byte.
-    pub mutating func byte(value: u8) -> !:
+    pub func byte(value: u8) -> !:
         if self.used == self.data.length:
             try self.reserve(1)
         self.data[self.used] = value
         self.used += 1
 
     ## Append `value` in decimal.
-    pub mutating func number(value: u64) -> !:
+    pub func number(value: u64) -> !:
         var digits: u8[20]
         var count: usize = 0
         var rest = value
@@ -57,11 +57,11 @@ pub struct Bytes:
         return self.data[0..<self.used]
 
     ## Forget the contents, keeping the storage.
-    pub mutating func clear():
+    pub func clear():
         self.used = 0
 
     ## Give the storage back.
-    pub mutating func close():
+    pub func close():
         if self.data.length > 0:
             free(self.data) in memory.heap
         var empty: u8[]

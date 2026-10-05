@@ -23,7 +23,7 @@ func has_high(data: const u8[]) -> bool:
 extend Client:
     ## Send message `data` from envelope sender `sender` to `recipients`; how many
     ## recipients accepted it. Refused recipients are listed by `refused`.
-    pub mutating func send(sender: str, recipients: const str[], data: const u8[]) -> usize!:
+    pub func send(sender: str, recipients: const str[], data: const u8[]) -> usize!:
         self.refused_text.clear()
         self.refused_total = 0
         if recipients.length == 0:
@@ -68,7 +68,7 @@ extend Client:
                 try self.refused_text.byte('\n')
                 self.refused_total += 1
         if accepted == 0:
-            discard(try self.command(b"RSET"))
+            _ = try self.command(b"RSET")
             error(no_recipients, "the server refused every recipient")
         if try self.command(b"DATA") != 354:
             try self.fail("DATA")
@@ -79,7 +79,7 @@ extend Client:
         return accepted
 
     ## Write `data` dot-stuffed with CRLF line ends, then the closing dot.
-    mutating func write_data(data: const u8[]) -> !:
+    func write_data(data: const u8[]) -> !:
         var out: Bytes
         defer out.close()
         var line_start = true

@@ -19,7 +19,7 @@ pub func main(arguments: str[]) -> i32!:
         try client.login(arguments[6], arguments[7])
     let recipients: str[1] = [arguments[5]]
     var message: u8[512]
-    let text = try format(message, f"From: {arguments[4]}\r\nTo: {arguments[5]}\r\nSubject: luce-smtp live check\r\n\r\nSent by luce-smtp.\r\n.dot line\r\n")
+    let text = try strings.format(message, f"From: {arguments[4]}\r\nTo: {arguments[5]}\r\nSubject: luce-smtp live check\r\n\r\nSent by luce-smtp.\r\n.dot line\r\n")
     let accepted = try client.send(arguments[4], recipients, text.bytes)
     print(f"accepted by {accepted}: {client.text()}")
     client.quit()

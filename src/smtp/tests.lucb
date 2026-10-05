@@ -119,10 +119,10 @@ test "a client authenticates, sends to the recipients it can and reports the res
     assert(client.refused_count() == 1 and try client.refused(0) == "nobody@example.test")
     let one: str[1] = ["bob@example.test"]
     var deferred_send = false
-    discard(client.send("alice@example.test", one, b"x\r\n") catch failure:
+    _ = client.send("alice@example.test", one, b"x\r\n") catch failure:
         assert(failure.code == deferred and client.text() == "4.3.0 Try again later")
         deferred_send = true
-        recover 0)
+        recover 0
     assert(deferred_send)
     client.quit()
     try finish_script(&script, handle)

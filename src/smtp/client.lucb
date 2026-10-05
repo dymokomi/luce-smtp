@@ -59,7 +59,7 @@ pub struct Client:
 
     ## Connect to `host` on `port`, read the greeting, say EHLO as `name` and upgrade
     ## with STARTTLS when `security` asks for it.
-    pub static func open(host: str, port: u16, security: Security, name: str = "localhost", timeout: u64 = default_timeout, cancellation: sync.Cancellation*? = none, trust: tls_stream.Trust = tls_stream.Trust()) -> Client!:
+    pub func open(host: str, port: u16, security: Security, name: str = "localhost", timeout: u64 = default_timeout, cancellation: sync.Cancellation*? = none, trust: tls_stream.Trust = tls_stream.Trust()) -> Client!:
         let stream = try tls_stream.Stream.connect(host, port, security == Security.tls, try net.Deadline.after(timeout), cancellation, policy = trust)
         var client = Client(stream = stream, timeout = timeout, cancellation = cancellation, connected = true)
         errdefer client.close()
@@ -76,21 +76,21 @@ pub struct Client:
         return client
 
     ## A client over an already connected, plain `connection` (tests).
-    pub static func over(connection: net.Connection, name: str = "localhost", timeout: u64 = default_timeout) -> Client!:
+    pub func over(connection: net.Connection, name: str = "localhost", timeout: u64 = default_timeout) -> Client!:
         var client = Client(stream = tls_stream.Stream.plain(connection), timeout = timeout, connected = true)
         errdefer client.close()
         try client.greet(name)
         return client
 
     ## Read the greeting and say EHLO.
-    mutating func greet(name: str) -> !:
+    func greet(name: str) -> !:
         try self.read_reply()
         if self.reply_code != 220:
             try self.fail("the server's greeting")
         try self.hello(name)
 
     ## Say EHLO as `name` and learn the extensions; fall back to HELO.
-    mutating func hello(name: str) -> !:
+    func hello(name: str) -> !:
         var line: Bytes
         defer line.close()
         try line.put(b"EHLO ")
@@ -165,7 +165,7 @@ pub struct Client:
     # mark: replies ==============================================================================
 
     ## Read one reply into `reply_code` and `reply_text`.
-    mutating func read_reply() -> !:
+    func read_reply() -> !:
         self.reply_text.clear()
         while true:
             let line = try self.read_line()
@@ -187,7 +187,7 @@ pub struct Client:
                 return
 
     ## The next line without its line end, valid until the next read.
-    mutating func read_line() -> const u8[]!:
+    func read_line() -> const u8[]!:
         var searched: usize = 0
         while true:
             let data = self.input.view()
@@ -207,7 +207,7 @@ pub struct Client:
             try self.fill()
 
     ## Read more from the server, first moving unread bytes to the front.
-    mutating func fill() -> !:
+    func fill() -> !:
         if not self.connected:
             error(disconnected, "the connection is closed")
         if self.input_start > 0:
@@ -222,13 +222,13 @@ pub struct Client:
         self.input.used += count
 
     ## Write `data` as it is.
-    mutating func write(data: const u8[]) -> !:
+    func write(data: const u8[]) -> !:
         if not self.connected:
             error(disconnected, "the connection is closed")
         try self.stream.write_within(data, try net.Deadline.after(self.timeout), self.cancellation)
 
     ## Send `line` with CRLF and read the reply; its code.
-    mutating func command(line: const u8[]) -> u16!:
+    func command(line: const u8[]) -> u16!:
         var out: Bytes
         defer out.close()
         try out.put(line)
@@ -238,12 +238,12 @@ pub struct Client:
         return self.reply_code
 
     ## Send `line` and fail unless the reply's code is in class `expected` (2 or 3).
-    mutating func expect(line: const u8[], expected: u16) -> !:
+    func expect(line: const u8[], expected: u16) -> !:
         if try self.command(line) // 100 != expected:
             try self.fail("the server refused")
 
     ## Fail with the last reply: deferred for 4xx, rejected for 5xx.
-    mutating func fail(context: str) -> !:
+    func fail(context: str) -> !:
         if self.reply_text.used == 0:
             try self.reply_text.text(context)
         if self.reply_code // 100 == 4:
@@ -253,7 +253,7 @@ pub struct Client:
     # mark: authentication =======================================================================
 
     ## Authenticate with a user name and password: AUTH PLAIN, else AUTH LOGIN.
-    pub mutating func login(user: str, password: str) -> !:
+    pub func login(user: str, password: str) -> !:
         var answer: Bytes
         defer answer.close()
         var line: Bytes
@@ -281,7 +281,7 @@ pub struct Client:
         error(unsupported, "the server offers no password authentication")
 
     ## Authenticate with an OAuth 2 access token (AUTH XOAUTH2).
-    pub mutating func login_oauth(user: str, token: str) -> !:
+    pub func login_oauth(user: str, token: str) -> !:
         if not self.offers("XOAUTH2"):
             error(unsupported, "the server does not offer XOAUTH2")
         var answer: Bytes
@@ -302,7 +302,7 @@ pub struct Client:
         try self.finish_auth(code)
 
     ## Check the completion of AUTH: 235 is success, anything else a failure.
-    mutating func finish_auth(code: u16) -> !:
+    func finish_auth(code: u16) -> !:
         if code == 235:
             return
         if code // 100 == 5:
@@ -312,14 +312,14 @@ pub struct Client:
     # mark: closing ==============================================================================
 
     ## Say goodbye and close; failures are ignored, the connection goes either way.
-    pub mutating func quit():
+    pub func quit():
         if self.connected:
-            discard(self.command(b"QUIT") catch failure:
-                recover 0)
+            _ = self.command(b"QUIT") catch failure:
+                recover 0
         self.close()
 
     ## Close the connection and give everything back.
-    pub mutating func close():
+    pub func close():
         if self.connected:
             self.stream.close() catch failure:
                 self.stream.destroy()
