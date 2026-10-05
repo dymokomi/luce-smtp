@@ -59,7 +59,7 @@ pub struct Client:
 
     ## Connect to `host` on `port`, read the greeting, say EHLO as `name` and upgrade
     ## with STARTTLS when `security` asks for it.
-    pub func open(host: str, port: u16, security: Security, name: str = "localhost", timeout: u64 = default_timeout, cancellation: sync.Cancellation*? = none, trust: tls_stream.Trust = tls_stream.Trust()) -> Client!:
+    pub static func open(host: str, port: u16, security: Security, name: str = "localhost", timeout: u64 = default_timeout, cancellation: sync.Cancellation*? = none, trust: tls_stream.Trust = tls_stream.Trust()) -> Client!:
         let stream = try tls_stream.Stream.connect(host, port, security == Security.tls, try net.Deadline.after(timeout), cancellation, policy = trust)
         var client = Client(stream = stream, timeout = timeout, cancellation = cancellation, connected = true)
         errdefer client.close()
@@ -76,7 +76,7 @@ pub struct Client:
         return client
 
     ## A client over an already connected, plain `connection` (tests).
-    pub func over(connection: net.Connection, name: str = "localhost", timeout: u64 = default_timeout) -> Client!:
+    pub static func over(connection: net.Connection, name: str = "localhost", timeout: u64 = default_timeout) -> Client!:
         var client = Client(stream = tls_stream.Stream.plain(connection), timeout = timeout, connected = true)
         errdefer client.close()
         try client.greet(name)

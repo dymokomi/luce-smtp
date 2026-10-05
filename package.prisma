@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-smtp" {
     str owner = "dymokomi"
-    str version = "0.3.0"
+    str version = "0.4.0"
     str kind = "package"
     str language = "luce-base"
     str description = "An SMTP submission client in luce-base: EHLO and its extensions, STARTTLS and implicit TLS, AUTH PLAIN/LOGIN/XOAUTH2, MAIL/RCPT/DATA with dot-stuffing, SIZE, 8BITMIME and SMTPUTF8, and every reply code kept for the caller."
@@ -10,13 +10,13 @@ def package "luce-smtp" {
 
     def dependency "luce-tls" {
         str owner = "dymokomi"
-        str version = "^0.3.0"
+        str version = "^0.4.0"
         str path = "../luce-tls"
     }
 
     def dependency "luce-std" {
         str owner = "dymokomi"
-        str version = "^0.4.0"
+        str version = "^0.5.0"
         str path = "../luce-std"
     }
 }
