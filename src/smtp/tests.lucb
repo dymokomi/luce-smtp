@@ -21,15 +21,6 @@ struct Script:
     var completed: usize
     var failure: str
 
-## Whether `a` and `b` hold the same bytes.
-func equal(a: const u8[], b: const u8[]) -> bool:
-    if a.length != b.length:
-        return false
-    for index in 0..<a.length:
-        if a[index] != b[index]:
-            return false
-    return true
-
 ## The scripted server's thread.
 func serve(context: void*?):
     let script = (Script*)(context else return)
@@ -62,7 +53,7 @@ func serve(context: void*?):
         var line = buffer[0..<stop]
         if line.length > 0 and line[line.length - 1] == '\r':
             line = line[0..<line.length - 1]
-        if line.length < step.expect.length or not equal(line[0..<step.expect.length], step.expect.bytes):
+        if line.length < step.expect.length or line[0..<step.expect.length] != step.expect.bytes:
             script.failure = step.expect
             return
         let consumed = stop + 1
