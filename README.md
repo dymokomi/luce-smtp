@@ -31,7 +31,7 @@ write has a deadline and can be cancelled from another thread.
 ## Test
 
 ```sh
-./test.sh       # sessions against a scripted loopback server
+luc test        # sessions against a scripted loopback server
 ```
 
 `tools/live.lucb` sends one test message through a real server:
